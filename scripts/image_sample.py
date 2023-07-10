@@ -7,10 +7,11 @@ import argparse
 import os
 
 import numpy as np
-import torch as th
+import torch
 import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from improved_diffusion import dist_util, logger
+from improved_diffusion import logger
 from improved_diffusion.script_util import (
     NUM_CLASSES,
     model_and_diffusion_defaults,
@@ -20,20 +21,25 @@ from improved_diffusion.script_util import (
 )
 
 
-def main():
+def main(multi_gpu=True):
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
     logger.configure()
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
-    model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
-    )
-    model.to(dist_util.dev())
+    if multi_gpu:
+        # create model and move it to GPU with id rank
+        dist.init_process_group("nccl")
+        rank = dist.get_rank()
+        logger.info(f"Start running basic DDP example on rank {rank}.")
+        device_id = rank % torch.cuda.device_count()
+        model = model.to(device_id)
+        model = DDP(model, device_ids=[device_id])
+
+    model.load_state_dict(torch.load(args.model_path))
     model.eval()
 
     logger.log("sampling...")
@@ -42,8 +48,8 @@ def main():
     while len(all_images) * args.batch_size < args.num_samples:
         model_kwargs = {}
         if args.class_cond:
-            classes = th.randint(
-                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=dist_util.dev()
+            classes = torch.randint(
+                low=0, high=NUM_CLASSES, size=(args.batch_size,), device=f'cuda:{rank}'
             )
             model_kwargs["y"] = classes
         sample_fn = (
@@ -55,16 +61,16 @@ def main():
             clip_denoised=args.clip_denoised,
             model_kwargs=model_kwargs,
         )
-        sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
+        sample = ((sample + 1) * 127.5).clamp(0, 255).to(torch.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+        gathered_samples = [torch.zeros_like(sample) for _ in range(dist.get_world_size())]
         dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
         all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
         if args.class_cond:
             gathered_labels = [
-                th.zeros_like(classes) for _ in range(dist.get_world_size())
+                torch.zeros_like(classes) for _ in range(dist.get_world_size())
             ]
             dist.all_gather(gathered_labels, classes)
             all_labels.extend([labels.cpu().numpy() for labels in gathered_labels])
@@ -77,7 +83,7 @@ def main():
         label_arr = label_arr[: args.num_samples]
     if dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(logger.get_dir(), f"samples_{shape_str}.npz")
+        out_path = os.patorch.join(logger.get_dir(), f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         if args.class_cond:
             np.savez(out_path, arr, label_arr)
