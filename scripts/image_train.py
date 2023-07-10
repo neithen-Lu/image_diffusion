@@ -4,7 +4,7 @@ Train a diffusion model on images.
 
 import argparse
 
-from improved_diffusion import dist_util, logger
+from improved_diffusion import logger
 from improved_diffusion.image_datasets import load_data
 from improved_diffusion.resample import create_named_schedule_sampler
 from improved_diffusion.script_util import (
@@ -14,19 +14,32 @@ from improved_diffusion.script_util import (
     add_dict_to_argparser,
 )
 from improved_diffusion.train_util import TrainLoop
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+os.environ["DIFFUSION_BLOB_LOGDIR"] = "tmp"
 
 
-def main():
+def main(multi_gpu=True):
     args = create_argparser().parse_args()
 
-    dist_util.setup_dist()
     logger.configure()
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
         **args_to_dict(args, model_and_diffusion_defaults().keys())
     )
-    model.to(dist_util.dev())
+    if multi_gpu:
+        # create model and move it to GPU with id rank
+        dist.init_process_group("nccl")
+        rank = dist.get_rank()
+        logger.info(f"Start running basic DDP example on rank {rank}.")
+        device_id = rank % torch.cuda.device_count()
+        model = model.to(device_id)
+        model = DDP(model, device_ids=[device_id])
+        
     schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
 
     logger.log("creating data loader...")
@@ -67,7 +80,7 @@ def create_argparser():
         batch_size=1,
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
-        log_interval=10,
+        log_interval=1000,
         save_interval=10000,
         resume_checkpoint="",
         use_fp16=False,
