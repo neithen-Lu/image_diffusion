@@ -2,7 +2,7 @@ import argparse
 import inspect
 
 from . import gaussian_diffusion as gd
-from .respace import SpacedDiffusion, space_timesteps
+from .respace import SpacedDiffusion, space_timesteps, DependentSpacedDiffusion
 from .unet import SuperResModel, UNetModel
 
 NUM_CLASSES = 1000
@@ -32,6 +32,7 @@ def model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_scale_shift_norm=True,
+        dependence=False
     )
 
 
@@ -55,6 +56,7 @@ def create_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_scale_shift_norm,
+    dependence
 ):
     model = create_model(
         image_size,
@@ -79,6 +81,8 @@ def create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        dependence=dependence,
+        image_size=image_size
     )
     return model, diffusion
 
@@ -156,6 +160,7 @@ def sr_create_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_scale_shift_norm,
+    dependence
 ):
     model = sr_create_model(
         large_size,
@@ -180,6 +185,7 @@ def sr_create_model_and_diffusion(
         rescale_timesteps=rescale_timesteps,
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
+        dependence=dependence
     )
     return model, diffusion
 
@@ -238,6 +244,8 @@ def create_gaussian_diffusion(
     rescale_timesteps=False,
     rescale_learned_sigmas=False,
     timestep_respacing="",
+    dependence=False,
+    image_size=64
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -248,7 +256,11 @@ def create_gaussian_diffusion(
         loss_type = gd.LossType.MSE
     if not timestep_respacing:
         timestep_respacing = [steps]
-    return SpacedDiffusion(
+    if dependence:
+        my_diffusion = DependentSpacedDiffusion
+    else:
+        my_diffusion = SpacedDiffusion
+    return my_diffusion(
         use_timesteps=space_timesteps(steps, timestep_respacing),
         betas=betas,
         model_mean_type=(
@@ -265,6 +277,7 @@ def create_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
+        image_size=image_size
     )
 
 

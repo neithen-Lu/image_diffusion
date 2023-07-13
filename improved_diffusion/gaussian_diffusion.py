@@ -123,6 +123,7 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
+        image_size=64
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -831,19 +832,235 @@ def toeplitz(c, r):
     return vals[j-i].reshape(*shape)
 
 def construct_cov_mat(image_size,decay_rate):
-    seq = torch.pow(decay_rate,torch.arange(num_frames))
-    padding = torch.zeros((image_size*image_size*num_frames))
-    for i in range(num_frames):
-        padding[i*image_size*image_size] = seq[i]
-    return toeplitz(padding,padding)
+    seq = torch.pow(decay_rate,torch.arange(image_size))
+    return torch.kron(toeplitz(seq,seq),toeplitz(seq,seq))
 
 class DependentDiffusion(GaussianDiffusion):
-    def __init__(self, *, betas, model_mean_type, model_var_type, loss_type, rescale_timesteps=False,decay_rate=0,image_size=64):
+    def __init__(self, *, betas, model_mean_type, model_var_type, loss_type, rescale_timesteps=False,decay_rate=0.5,image_size=64):
         super().__init__(betas=betas, model_mean_type=model_mean_type, model_var_type=model_var_type, loss_type=loss_type, rescale_timesteps=rescale_timesteps)
+        self.image_size = image_size
         self.cov_mat = construct_cov_mat(image_size,decay_rate)
-        self.inv_cov_mat = torch.inverse(self.cov_mat)
+        # print(self.cov_mat)
+        # self.inv_cov_mat = torch.inverse(self.cov_mat)
         self.sampler = torch.distributions.multivariate_normal.MultivariateNormal(loc=torch.zeros(image_size*image_size),covariance_matrix=self.cov_mat)
+    
+    def q_sample(self, x_start, t, noise=None):
+        """
+        Diffuse the data for a given number of diffusion steps.
 
+        In other words, sample from q(x_t | x_0).
+
+        :param x_start: the initial data batch.
+        :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
+        :param noise: if specified, the split-out normal noise.
+        :return: A noisy version of x_start.
+        """
+        if noise is None:
+            noise = self.sampler.sample([x_start.shape[0],x_start.shape[1]]).view((x_start.shape[0],x_start.shape[1],self.image_size,self.image_size)).to(x_start.device)
+        assert noise.shape == x_start.shape
+        return (
+            _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
+            + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
+            * noise
+        )
+    
+    def p_sample(
+        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
+    ):
+        """
+        Sample x_{t-1} from the model at the given timestep.
+
+        :param model: the model to sample from.
+        :param x: the current tensor at x_{t-1}.
+        :param t: the value of t, starting at 0 for the first diffusion step.
+        :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :return: a dict containing the following keys:
+                 - 'sample': a random sample from the model.
+                 - 'pred_xstart': a prediction of x_0.
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        noise = self.sampler.sample([x.shape[0],x.shape[1]]).view((x.shape[0],x.shape[1],self.image_size,self.image_size)).to(x.device)
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    def ddim_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        model_kwargs=None,
+        eta=0.0,
+    ):
+        """
+        Sample x_{t-1} from the model using DDIM.
+
+        Same usage as p_sample().
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        # Usually our model outputs epsilon, but we re-derive it
+        # in case we used x_start or x_prev prediction.
+        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
+        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
+        sigma = (
+            eta
+            * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
+            * torch.sqrt(1 - alpha_bar / alpha_bar_prev)
+        )
+        # Equation 12.
+        noise = self.sampler.sample([x.shape[0],x.shape[1]]).view((x.shape[0],x.shape[1],self.image_size,self.image_size)).to(x.device)
+        mean_pred = (
+            out["pred_xstart"] * torch.sqrt(alpha_bar_prev)
+            + torch.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        )
+        nonzero_mask = (
+            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        )  # no noise when t == 0
+        sample = mean_pred + nonzero_mask * sigma * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+    
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+        """
+        Compute training losses for a single timestep.
+
+        :param model: the model to evaluate loss on.
+        :param x_start: the [N x C x ...] tensor of inputs.
+        :param t: a batch of timestep indices.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :param noise: if specified, the specific Gaussian noise to try to remove.
+        :return: a dict with the key "loss" containing a tensor of shape [N].
+                 Some mean or variance settings may also have other keys.
+        """
+        if model_kwargs is None:
+            model_kwargs = {}
+        if noise is None:
+            noise = self.sampler.sample([x_start.shape[0],x_start.shape[1]]).view((x_start.shape[0],x_start.shape[1],self.image_size,self.image_size)).to(x_start.device)
+        x_t = self.q_sample(x_start, t, noise=noise)
+
+        terms = {}
+
+        if self.loss_type == LossType.KL or self.loss_type == LossType.RESCALED_KL:
+            terms["loss"] = self._vb_terms_bpd(
+                model=model,
+                x_start=x_start,
+                x_t=x_t,
+                t=t,
+                clip_denoised=False,
+                model_kwargs=model_kwargs,
+            )["output"]
+            if self.loss_type == LossType.RESCALED_KL:
+                terms["loss"] *= self.num_timesteps
+        elif self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
+            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
+
+            if self.model_var_type in [
+                ModelVarType.LEARNED,
+                ModelVarType.LEARNED_RANGE,
+            ]:
+                B, C = x_t.shape[:2]
+                assert model_output.shape == (B, C * 2, *x_t.shape[2:])
+                model_output, model_var_values = torch.split(model_output, C, dim=1)
+                # Learn the variance using the variational bound, but don't let
+                # it affect our mean prediction.
+                frozen_out = torch.cat([model_output.detach(), model_var_values], dim=1)
+                terms["vb"] = self._vb_terms_bpd(
+                    model=lambda *args, r=frozen_out: r,
+                    x_start=x_start,
+                    x_t=x_t,
+                    t=t,
+                    clip_denoised=False,
+                )["output"]
+                if self.loss_type == LossType.RESCALED_MSE:
+                    # Divide by 1000 for equivalence with initial implementation.
+                    # Without a factor of 1/1000, the VB term hurts the MSE term.
+                    terms["vb"] *= self.num_timesteps / 1000.0
+
+            target = {
+                ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
+                    x_start=x_start, x_t=x_t, t=t
+                )[0],
+                ModelMeanType.START_X: x_start,
+                ModelMeanType.EPSILON: noise,
+            }[self.model_mean_type]
+            assert model_output.shape == target.shape == x_start.shape
+            terms["mse"] = mean_flat((target - model_output) ** 2)
+            if "vb" in terms:
+                terms["loss"] = terms["mse"] + terms["vb"]
+            else:
+                terms["loss"] = terms["mse"]
+        else:
+            raise NotImplementedError(self.loss_type)
+
+        return terms
+    
+    def calc_bpd_loop(self, model, x_start, clip_denoised=True, model_kwargs=None):
+        """
+        Compute the entire variational lower-bound, measured in bits-per-dim,
+        as well as other related quantities.
+        Should not be used as we do not expect vlb loss
+        """
+        device = x_start.device
+        batch_size = x_start.shape[0]
+
+        vb = []
+        xstart_mse = []
+        mse = []
+        for t in list(range(self.num_timesteps))[::-1]:
+            t_batch = torch.tensor([t] * batch_size, device=device)
+            noise = self.sampler.sample([x_start.shape[0],x_start.shape[1]]).view((x_start.shape[0],x_start.shape[1],self.image_size,self.image_size)).to(x_start.device)
+            x_t = self.q_sample(x_start=x_start, t=t_batch, noise=noise)
+            # Calculate VLB term at the current timestep
+            with torch.no_grad():
+                out = self._vb_terms_bpd(
+                    model,
+                    x_start=x_start,
+                    x_t=x_t,
+                    t=t_batch,
+                    clip_denoised=clip_denoised,
+                    model_kwargs=model_kwargs,
+                )
+            vb.append(out["output"])
+            xstart_mse.append(mean_flat((out["pred_xstart"] - x_start) ** 2))
+            eps = self._predict_eps_from_xstart(x_t, t_batch, out["pred_xstart"])
+            mse.append(mean_flat((eps - noise) ** 2))
+
+        vb = torch.stack(vb, dim=1)
+        xstart_mse = torch.stack(xstart_mse, dim=1)
+        mse = torch.stack(mse, dim=1)
+
+        prior_bpd = self._prior_bpd(x_start)
+        total_bpd = vb.sum(dim=1) + prior_bpd
+        return {
+            "total_bpd": total_bpd,
+            "prior_bpd": prior_bpd,
+            "vb": vb,
+            "xstart_mse": xstart_mse,
+            "mse": mse,
+        }
 
 def _extract_into_tensor(arr, timesteps, broadcast_shape):
     """

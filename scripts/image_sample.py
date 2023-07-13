@@ -83,7 +83,7 @@ def main(multi_gpu=True):
         label_arr = label_arr[: args.num_samples]
     if dist.get_rank() == 0:
         shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.patorch.join(logger.get_dir(), f"samples_{shape_str}.npz")
+        out_path = os.path.join(args.sample_path, f"samples_{shape_str}.npz")
         logger.log(f"saving to {out_path}")
         if args.class_cond:
             np.savez(out_path, arr, label_arr)
@@ -101,6 +101,7 @@ def create_argparser():
         batch_size=16,
         use_ddim=False,
         model_path="",
+        sample_path="tmp"
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
