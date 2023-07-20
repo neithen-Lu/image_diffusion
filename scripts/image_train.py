@@ -18,14 +18,13 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
-os.environ["DIFFUSION_BLOB_LOGDIR"] = "tmp"
 
 
 def main(multi_gpu=True):
     args = create_argparser().parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_no
 
-    logger.configure()
+    logger.configure(dir=args.log_dir)
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -85,7 +84,12 @@ def create_argparser():
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,
-        dependence=False
+        dependence=False,
+        log_dir=None,
+        gpu_no="0",
+        cov_type='global',
+        decay_rate=0.1,
+        local_size=16,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

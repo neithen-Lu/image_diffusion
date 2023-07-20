@@ -32,7 +32,10 @@ def model_and_diffusion_defaults():
         rescale_learned_sigmas=True,
         use_checkpoint=False,
         use_scale_shift_norm=True,
-        dependence=False
+        dependence=False,
+        cov_type='global',
+        local_size=16,
+        decay_rate=0.1,
     )
 
 
@@ -56,7 +59,10 @@ def create_model_and_diffusion(
     rescale_learned_sigmas,
     use_checkpoint,
     use_scale_shift_norm,
-    dependence
+    dependence,
+    cov_type,
+    local_size,
+    decay_rate,
 ):
     model = create_model(
         image_size,
@@ -82,7 +88,10 @@ def create_model_and_diffusion(
         rescale_learned_sigmas=rescale_learned_sigmas,
         timestep_respacing=timestep_respacing,
         dependence=dependence,
-        image_size=image_size
+        image_size=image_size,
+        cov_type=cov_type,
+        local_size=local_size,
+        decay_rate=decay_rate,
     )
     return model, diffusion
 
@@ -245,7 +254,10 @@ def create_gaussian_diffusion(
     rescale_learned_sigmas=False,
     timestep_respacing="",
     dependence=False,
-    image_size=64
+    image_size=64,
+    cov_type='global',
+    local_size=16,
+    decay_rate=0.1,
 ):
     betas = gd.get_named_beta_schedule(noise_schedule, steps)
     if use_kl:
@@ -277,7 +289,10 @@ def create_gaussian_diffusion(
         ),
         loss_type=loss_type,
         rescale_timesteps=rescale_timesteps,
-        image_size=image_size
+        image_size=image_size,
+        cov_type=cov_type,
+        local_size=local_size,
+        decay_rate=decay_rate,
     )
 
 

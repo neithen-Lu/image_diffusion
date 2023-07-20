@@ -5,3 +5,5 @@ tmp/
 baseline/
 improved_diffusion.egg-info/
 visualize/
+result/
+checkpoint/

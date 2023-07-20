@@ -5,6 +5,7 @@ numpy array. This can be used to produce samples for FID evaluation.
 
 import argparse
 import os
+import time
 
 import numpy as np
 import torch
@@ -23,8 +24,9 @@ from improved_diffusion.script_util import (
 
 def main(multi_gpu=True):
     args = create_argparser().parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_no
 
-    logger.configure()
+    logger.configure(dir=args.log_dir)
 
     logger.log("creating model and diffusion...")
     model, diffusion = create_model_and_diffusion(
@@ -39,10 +41,10 @@ def main(multi_gpu=True):
         model = model.to(device_id)
         model = DDP(model, device_ids=[device_id])
 
-    model.load_state_dict(torch.load(args.model_path))
+    model.module.load_state_dict(torch.load(args.model_path))
     model.eval()
 
-    logger.log("sampling...")
+    logger.log(f"{time.ctime(time.time())} sampling...")
     all_images = []
     all_labels = []
     while len(all_images) * args.batch_size < args.num_samples:
@@ -81,17 +83,17 @@ def main(multi_gpu=True):
     if args.class_cond:
         label_arr = np.concatenate(all_labels, axis=0)
         label_arr = label_arr[: args.num_samples]
-    if dist.get_rank() == 0:
-        shape_str = "x".join([str(x) for x in arr.shape])
-        out_path = os.path.join(args.sample_path, f"samples_{shape_str}.npz")
-        logger.log(f"saving to {out_path}")
-        if args.class_cond:
-            np.savez(out_path, arr, label_arr)
-        else:
-            np.savez(out_path, arr)
+    # if dist.get_rank() == 0:
+    shape_str = "x".join([str(x) for x in arr.shape])
+    out_path = os.path.join(args.sample_path, f"samples_{dist.get_rank()}_{shape_str}.npz")
+    logger.log(f"saving to {out_path}")
+    if args.class_cond:
+        np.savez(out_path, arr, label_arr)
+    else:
+        np.savez(out_path, arr)
 
     dist.barrier()
-    logger.log("sampling complete")
+    logger.log(f"{time.ctime(time.time())} sampling complete")
 
 
 def create_argparser():
@@ -101,7 +103,13 @@ def create_argparser():
         batch_size=16,
         use_ddim=False,
         model_path="",
-        sample_path="tmp"
+        sample_path="tmp",
+        dependence=False,
+        log_dir=None,
+        gpu_no="0",
+        cov_type='global',
+        decay_rate=0.1,
+        local_size=16,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

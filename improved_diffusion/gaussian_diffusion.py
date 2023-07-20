@@ -123,7 +123,8 @@ class GaussianDiffusion:
         model_var_type,
         loss_type,
         rescale_timesteps=False,
-        image_size=64
+        image_size=64,
+        cov_type='global',local_size=16,decay_rate=0.1,
     ):
         self.model_mean_type = model_mean_type
         self.model_var_type = model_var_type
@@ -835,11 +836,30 @@ def construct_cov_mat(image_size,decay_rate):
     seq = torch.pow(decay_rate,torch.arange(image_size))
     return torch.kron(toeplitz(seq,seq),toeplitz(seq,seq))
 
+def construct_cov_mat_local1(image_size,decay_rate,local_size):
+    seq = torch.pow(decay_rate,torch.arange(image_size))
+    seq[local_size:] = torch.zeros(image_size-local_size)
+    return torch.kron(toeplitz(seq,seq),toeplitz(seq,seq))
+
+def construct_cov_mat_local2(image_size,decay_rate,local_size):
+    seq = torch.pow(decay_rate,torch.arange(image_size))
+    m_matrix = torch.kron(toeplitz(seq,seq),toeplitz(seq,seq))
+    for i in range(image_size ** 2):
+        for j in range(image_size ** 2):
+            if m_matrix[i,j] < decay_rate ** local_size:
+                m_matrix[i,j] = 0
+    return m_matrix
+
 class DependentDiffusion(GaussianDiffusion):
-    def __init__(self, *, betas, model_mean_type, model_var_type, loss_type, rescale_timesteps=False,decay_rate=0.5,image_size=64):
+    def __init__(self, *, betas, model_mean_type, model_var_type, loss_type, rescale_timesteps=False,decay_rate=0.1,image_size=64,cov_type='global',local_size=16):
         super().__init__(betas=betas, model_mean_type=model_mean_type, model_var_type=model_var_type, loss_type=loss_type, rescale_timesteps=rescale_timesteps)
         self.image_size = image_size
-        self.cov_mat = construct_cov_mat(image_size,decay_rate)
+        if cov_type == 'glocal':
+            self.cov_mat = construct_cov_mat(image_size,decay_rate)
+        elif cov_type == 'local1':
+            self.cov_mat = construct_cov_mat_local1(image_size,decay_rate,local_size)
+        elif cov_type == 'local2':
+            self.cov_mat = construct_cov_mat_local2(image_size,decay_rate,local_size)
         # print(self.cov_mat)
         # self.inv_cov_mat = torch.inverse(self.cov_mat)
         self.sampler = torch.distributions.multivariate_normal.MultivariateNormal(loc=torch.zeros(image_size*image_size),covariance_matrix=self.cov_mat)
