@@ -23,6 +23,7 @@ import os
 def main(multi_gpu=True):
     args = create_argparser().parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_no
+    os.environ["OMP_NUM_THREADS"] = "10"
 
     logger.configure(dir=args.log_dir)
 

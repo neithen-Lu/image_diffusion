@@ -25,6 +25,8 @@ from improved_diffusion.script_util import (
 def main(multi_gpu=True):
     args = create_argparser().parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_no
+    os.environ["OMP_NUM_THREADS"] = "10"
+    torch.set_num_threads(10)
 
     logger.configure(dir=args.log_dir)
 
@@ -41,7 +43,7 @@ def main(multi_gpu=True):
         model = model.to(device_id)
         model = DDP(model, device_ids=[device_id])
 
-    model.module.load_state_dict(torch.load(args.model_path))
+    model.load_state_dict(torch.load(args.model_path))
     model.eval()
 
     logger.log(f"{time.ctime(time.time())} sampling...")

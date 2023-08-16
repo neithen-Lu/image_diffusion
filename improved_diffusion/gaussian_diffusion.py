@@ -854,7 +854,7 @@ class DependentDiffusion(GaussianDiffusion):
     def __init__(self, *, betas, model_mean_type, model_var_type, loss_type, rescale_timesteps=False,decay_rate=0.1,image_size=64,cov_type='global',local_size=16):
         super().__init__(betas=betas, model_mean_type=model_mean_type, model_var_type=model_var_type, loss_type=loss_type, rescale_timesteps=rescale_timesteps)
         self.image_size = image_size
-        if cov_type == 'glocal':
+        if cov_type == 'global':
             self.cov_mat = construct_cov_mat(image_size,decay_rate)
         elif cov_type == 'local1':
             self.cov_mat = construct_cov_mat_local1(image_size,decay_rate,local_size)
